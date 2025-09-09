@@ -496,4 +496,11 @@ if check_auto_refresh():
 
 # Run the app
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        st.error(f"Application Error: {str(e)}")
+        st.write("**Debug Info:**")
+        st.write(f"Python version: {st.__version__}")
+        st.write(f"Scraping available: {SCRAPING_AVAILABLE}")
+        st.exception(e)
