@@ -1,506 +1,402 @@
-# app.py - AMAG Competitor Intelligence Dashboard
-import streamlit as st
+import gradio as gr
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 from datetime import datetime, timedelta
 import json
-import time
 import re
-from urllib.parse import urljoin, urlparse
-import hashlib
+import time
+from typing import Dict, List, Tuple
+import plotly.graph_objects as go
+import plotly.express as px
 
-# Page Configuration
-st.set_page_config(
-    page_title="AMAG Competitor Intelligence",
-    page_icon="🚗",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS
-st.markdown("""
-<style>
-.metric-card {
-    background-color: #f0f2f6;
-    padding: 1rem;
-    border-radius: 0.5rem;
-    border-left: 4px solid #1f77b4;
+# Configuration
+COMPETITORS = {
+    'Emil Frey': {
+        'url': 'https://www.emilfrey.ch',
+        'aktionen_url': 'https://www.emilfrey.ch/de/aktionen',
+        'selector_title': 'h1, h2, h3',
+        'selector_price': '.price, .preis, span[class*="price"]'
+    },
+    'Garage Weiss': {
+        'url': 'https://www.garage-weiss.ch',
+        'aktionen_url': 'https://www.garage-weiss.ch/angebote',
+        'selector_title': 'h1, h2, h3',
+        'selector_price': '.price, .preis, span[class*="price"]'
+    },
+    'Auto Kunz': {
+        'url': 'https://www.autokunz.ch',
+        'aktionen_url': 'https://www.autokunz.ch/aktionen',
+        'selector_title': 'h1, h2, h3',
+        'selector_price': '.price, .preis, span[class*="price"]'
+    }
 }
-.alert-high { border-left-color: #ff4444; }
-.alert-medium { border-left-color: #ffaa00; }
-.alert-low { border-left-color: #00aa44; }
-.competitor-header {
-    background: linear-gradient(90deg, #1f77b4, #17becf);
-    color: white;
-    padding: 1rem;
-    border-radius: 0.5rem;
-    margin: 1rem 0;
-}
-</style>
-""", unsafe_allow_html=True)
 
-# Data Storage in Session State
-if 'crawl_data' not in st.session_state:
-    st.session_state.crawl_data = {}
-if 'alerts' not in st.session_state:
-    st.session_state.alerts = []
-if 'last_update' not in st.session_state:
-    st.session_state.last_update = {}
+# Demo/Fallback Data
+DEMO_DATA = {
+    'Emil Frey': {
+        'aktionen': [
+            {'title': 'VW Golf - Winteraktion', 'price': 'CHF 29,900', 'discount': '15%'},
+            {'title': 'Audi A3 Sportback - Leasing', 'price': 'CHF 299/Mt', 'discount': '0% Leasing'},
+            {'title': 'Service-Paket Winter', 'price': 'CHF 199', 'discount': '20% Rabatt'}
+        ],
+        'keywords': ['winteraktion', 'leasing', 'service', 'vw', 'audi', 'rabatt'],
+        'last_update': datetime.now().strftime('%Y-%m-%d %H:%M')
+    },
+    'Garage Weiss': {
+        'aktionen': [
+            {'title': 'Mercedes A-Klasse', 'price': 'CHF 35,500', 'discount': '10%'},
+            {'title': 'BMW 3er - Business Paket', 'price': 'CHF 45,900', 'discount': 'Inkl. Extras'},
+            {'title': 'Winterreifen-Aktion', 'price': 'CHF 599', 'discount': '25% Rabatt'}
+        ],
+        'keywords': ['mercedes', 'bmw', 'business', 'winterreifen', 'premium'],
+        'last_update': datetime.now().strftime('%Y-%m-%d %H:%M')
+    },
+    'Auto Kunz': {
+        'aktionen': [
+            {'title': 'Toyota Hybrid-Wochen', 'price': 'CHF 31,900', 'discount': 'Ökobonus'},
+            {'title': 'Mazda CX-5 4x4', 'price': 'CHF 39,900', 'discount': '12%'},
+            {'title': 'Gratis-Service 3 Jahre', 'price': 'CHF 0', 'discount': 'Beim Neukauf'}
+        ],
+        'keywords': ['hybrid', 'toyota', 'mazda', '4x4', 'ökobonus', 'gratis'],
+        'last_update': datetime.now().strftime('%Y-%m-%d %H:%M')
+    }
+}
 
 class CompetitorScraper:
     def __init__(self):
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
-    
-    def scrape_emil_frey(self):
-        """Scrape Emil Frey Angebote und Leasing-Aktionen"""
+        self.use_demo_mode = False
+        
+    def scrape_competitor(self, name: str, config: Dict) -> Dict:
+        """Scrape competitor website with fallback to demo data"""
         try:
-            results = {
-                'aktionen': [],
-                'preise': [],
-                'news': [],
-                'timestamp': datetime.now()
-            }
-            
-            # Hauptseite crawlen
-            main_url = "https://www.emil-frey.ch"
-            response = requests.get(main_url, headers=self.headers, timeout=15)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Aktionen/Angebote finden
-            action_selectors = [
-                'div[class*="offer"]', 'div[class*="angebot"]', 'div[class*="aktion"]',
-                'section[class*="promotion"]', '.teaser', '.campaign'
-            ]
-            
-            for selector in action_selectors:
-                elements = soup.select(selector)
-                for element in elements[:3]:
-                    text = element.get_text(strip=True)
-                    if 50 < len(text) < 300 and any(word in text.lower() for word in ['leasing', 'aktion', 'angebot', 'prozent', '%']):
-                        
-                        # Link extrahieren
-                        link_elem = element.find('a')
-                        link = urljoin(main_url, link_elem['href']) if link_elem and link_elem.get('href') else None
-                        
-                        results['aktionen'].append({
-                            'title': text[:100] + "..." if len(text) > 100 else text,
-                            'link': link,
-                            'gefunden_um': datetime.now().strftime("%H:%M"),
-                            'source': 'Hauptseite'
-                        })
-            
-            # Leasing-Seite crawlen
-            try:
-                leasing_url = "https://www.emil-frey.ch/de/services/leasing"
-                leasing_response = requests.get(leasing_url, headers=self.headers, timeout=10)
-                leasing_soup = BeautifulSoup(leasing_response.content, 'html.parser')
+            # Try actual scraping
+            response = requests.get(config['aktionen_url'], headers=self.headers, timeout=5)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # Leasing-spezifische Inhalte
-                price_elements = leasing_soup.find_all(['div', 'span', 'p'], string=re.compile(r'CHF|\d+\.-|Leasing'))
-                for elem in price_elements[:5]:
-                    parent_text = elem.parent.get_text(strip=True) if elem.parent else elem.get_text(strip=True)
-                    if 30 < len(parent_text) < 200:
-                        results['preise'].append({
-                            'info': parent_text,
-                            'source': 'Leasing-Seite'
-                        })
-            except:
-                pass
-            
-            # Aktuelle News/Blog
-            try:
-                news_selectors = ['article', '.news-item', '.blog-post', 'h2', 'h3']
-                for selector in news_selectors:
-                    elements = soup.select(selector)
-                    for element in elements[:3]:
-                        text = element.get_text(strip=True)
-                        if 30 < len(text) < 150 and not any(skip in text.lower() for skip in ['cookie', 'datenschutz', 'navigation']):
-                            results['news'].append({
-                                'headline': text,
-                                'timestamp': datetime.now().strftime("%H:%M")
-                            })
-                            break
-            except:
-                pass
-            
-            return results
-            
-        except Exception as e:
-            return {
-                'aktionen': [{'title': f'Fehler beim Laden: {str(e)[:100]}', 'link': None, 'gefunden_um': 'Error', 'source': 'Error'}],
-                'preise': [],
-                'news': [],
-                'timestamp': datetime.now()
-            }
-    
-    def scrape_garage_weiss(self):
-        """Scrape Garage Weiss"""
-        try:
-            results = {
-                'aktionen': [],
-                'preise': [],
-                'services': [],
-                'timestamp': datetime.now()
-            }
-            
-            main_url = "https://www.garage-weiss.ch"
-            response = requests.get(main_url, headers=self.headers, timeout=15)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Angebote suchen
-            offer_texts = []
-            for element in soup.find_all(['div', 'section', 'article']):
-                text = element.get_text(strip=True)
-                if any(keyword in text.lower() for keyword in ['angebot', 'aktion', 'special', 'promo']) and 40 < len(text) < 250:
-                    offer_texts.append(text)
-            
-            for i, text in enumerate(offer_texts[:4]):
-                results['aktionen'].append({
-                    'title': text[:120] + "..." if len(text) > 120 else text,
-                    'gefunden_um': datetime.now().strftime("%H:%M"),
-                    'source': 'Hauptseite'
-                })
-            
-            # Service-Angebote
-            service_keywords = ['service', 'wartung', 'reparatur', 'check']
-            for element in soup.find_all(string=re.compile('|'.join(service_keywords), re.I)):
-                parent_text = element.parent.get_text(strip=True)[:100] if element.parent else str(element)[:100]
-                if 25 < len(parent_text) < 150:
-                    results['services'].append({
-                        'service': parent_text,
-                        'kategorie': 'Service'
-                    })
-                    if len(results['services']) >= 3:
-                        break
-                        
-            return results
-            
-        except Exception as e:
-            return {
-                'aktionen': [{'title': f'Garage Weiss Daten nicht verfügbar: {str(e)[:80]}', 'gefunden_um': 'Error', 'source': 'Error'}],
-                'preise': [],
-                'services': [],
-                'timestamp': datetime.now()
-            }
-
-def generate_mock_alerts():
-    """Generiert realistische Mock-Alerts für Demo"""
-    current_time = datetime.now()
-    
-    alerts = [
-        {
-            "zeit": (current_time - timedelta(minutes=15)).strftime("%H:%M"),
-            "competitor": "Emil Frey",
-            "typ": "Neue Leasing-Aktion",
-            "details": "0% Leasing-Aktion für Elektrofahrzeuge gestartet - läuft bis Ende Monat",
-            "priority": "🔴 Hoch",
-            "impact": "Direkte Konkurrenz zu unseren E-Golf und ID.4 Angeboten",
-            "action": "Prüfen ob wir kontern sollten"
-        },
-        {
-            "zeit": (current_time - timedelta(hours=2)).strftime("%H:%M"),
-            "competitor": "Garage Weiss", 
-            "typ": "Preisreduktion",
-            "details": "Golf 8 Leasing um 80 CHF/Monat reduziert",
-            "priority": "🟡 Medium",
-            "impact": "Preisdruck auf unsere Golf-Modelle",
-            "action": "Marketing Team informiert"
-        },
-        {
-            "zeit": (current_time - timedelta(hours=4)).strftime("%H:%M"),
-            "competitor": "Auto Welt",
-            "typ": "Neue Service-Offensive",
-            "details": "Mobile Wartung + Hol-Bring-Service prominent beworben",
-            "priority": "🟠 Medium",
-            "impact": "Service-Innovation die wir evaluieren könnten",
-            "action": "Service-Team kontaktieren"
-        }
-    ]
-    
-    return alerts
-
-def analyze_content_gaps():
-    """Content-Gap-Analyse"""
-    opportunities = [
-        {
-            "kategorie": "E-Mobilität",
-            "gap": "Emil Frey bewirbt sehr prominent E-Auto-Beratung und Ladeinfrastruktur",
-            "amag_opportunity": "Unsere E-Kompetenz (VW ID-Familie, e-tron) stärker hervorheben",
-            "priority": "Hoch",
-            "aufwand": "Medium"
-        },
-        {
-            "kategorie": "Service",
-            "gap": "Garage Weiss pusht 'Rundum-Sorglos-Pakete' und Wartungsverträge",
-            "amag_opportunity": "Unser Service-Portfolio geschickter vermarkten",
-            "priority": "Medium", 
-            "aufwand": "Niedrig"
-        },
-        {
-            "kategorie": "Finanzierung",
-            "gap": "Konkurrenz macht Leasing-Rechner sehr prominent",
-            "amag_opportunity": "Unseren Finanzierungsrechner prominenter platzieren",
-            "priority": "Hoch",
-            "aufwand": "Niedrig"
-        },
-        {
-            "kategorie": "Digitale Services",
-            "gap": "Auto Welt bewirbt Online-Terminbuchung und Mobile Apps",
-            "amag_opportunity": "Unsere digitalen Services besser kommunizieren",
-            "priority": "Medium",
-            "aufwand": "Medium"
-        }
-    ]
-    
-    return opportunities
-
-# Main App
-def main():
-    # Header
-    st.markdown("""
-    <div class="competitor-header">
-        <h1>🚗 AMAG Competitor Intelligence Dashboard</h1>
-        <p>Live Monitoring der wichtigsten Konkurrenten im Schweizer Automarkt</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Sidebar
-    with st.sidebar:
-        st.header("⚙️ Einstellungen")
-        
-        competitors = ["Emil Frey", "Garage Weiss", "Auto Welt", "Alle Competitors"]
-        selected_competitor = st.selectbox("Competitor auswählen:", competitors)
-        
-        st.markdown("---")
-        
-        # Manual Update Button
-        if st.button("🔄 Daten aktualisieren", type="primary"):
-            with st.spinner("Aktualisiere Daten..."):
-                scraper = CompetitorScraper()
-                if selected_competitor in ["Emil Frey", "Alle Competitors"]:
-                    st.session_state.crawl_data['Emil Frey'] = scraper.scrape_emil_frey()
-                if selected_competitor in ["Garage Weiss", "Alle Competitors"]:
-                    st.session_state.crawl_data['Garage Weiss'] = scraper.scrape_garage_weiss()
+                # Extract data
+                titles = [t.text.strip() for t in soup.select(config['selector_title'])[:5]]
+                prices = [p.text.strip() for p in soup.select(config['selector_price'])[:5]]
                 
-                st.session_state.last_update[selected_competitor] = datetime.now()
-                st.success("✅ Daten aktualisiert!")
-                time.sleep(1)
-                st.rerun()
+                # Extract keywords
+                text_content = soup.get_text().lower()
+                keywords = self.extract_keywords(text_content)
+                
+                aktionen = []
+                for i, title in enumerate(titles):
+                    if title:
+                        aktionen.append({
+                            'title': title,
+                            'price': prices[i] if i < len(prices) else 'Auf Anfrage',
+                            'discount': self.extract_discount(title + ' ' + (prices[i] if i < len(prices) else ''))
+                        })
+                
+                if aktionen:  # Only return if we found actual data
+                    return {
+                        'aktionen': aktionen[:3],
+                        'keywords': keywords[:10],
+                        'last_update': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                        'source': 'live'
+                    }
+        except Exception as e:
+            print(f"Scraping failed for {name}: {str(e)}")
         
-        st.markdown("---")
+        # Fallback to demo data
+        self.use_demo_mode = True
+        demo = DEMO_DATA.get(name, {})
+        demo['source'] = 'demo'
+        return demo
+    
+    def extract_keywords(self, text: str) -> List[str]:
+        """Extract relevant keywords from text"""
+        # Common automotive keywords
+        auto_keywords = ['leasing', 'rabatt', 'aktion', 'winter', 'sommer', 'service',
+                        'garantie', 'finanzierung', 'occasion', 'neuwagen', 'hybrid',
+                        'elektro', '4x4', 'suv', 'kombi', 'limousine']
         
-        # Auto-Update Info
-        st.info("💡 **Auto-Update:** Dashboard aktualisiert sich automatisch alle 30 Minuten")
+        found_keywords = []
+        for keyword in auto_keywords:
+            if keyword in text:
+                found_keywords.append(keyword)
         
-        # Last Update Info
-        if selected_competitor in st.session_state.last_update:
-            last_update = st.session_state.last_update[selected_competitor]
-            st.write(f"🕐 Letztes Update: {last_update.strftime('%H:%M:%S')}")
+        # Extract brand mentions
+        brands = ['vw', 'volkswagen', 'audi', 'mercedes', 'bmw', 'toyota', 'mazda',
+                 'ford', 'opel', 'seat', 'skoda', 'porsche', 'tesla']
+        for brand in brands:
+            if brand in text:
+                found_keywords.append(brand)
+        
+        return list(set(found_keywords))[:15]
     
-    # Key Metrics Row
-    st.header("📊 Key Metrics (Heute)")
+    def extract_discount(self, text: str) -> str:
+        """Extract discount information from text"""
+        text = text.lower()
+        
+        # Look for percentage
+        percent_match = re.search(r'(\d+)\s*%', text)
+        if percent_match:
+            return f"{percent_match.group(1)}%"
+        
+        # Look for CHF amounts
+        chf_match = re.search(r'chf\s*(\d+)', text)
+        if chf_match:
+            return f"CHF {chf_match.group(1)} Rabatt"
+        
+        # Look for keywords
+        if 'gratis' in text:
+            return 'Gratis'
+        if 'kostenlos' in text:
+            return 'Kostenlos'
+        if 'aktion' in text:
+            return 'Sonderaktion'
+        if 'leasing' in text:
+            return 'Leasing-Angebot'
+        
+        return 'Angebot'
+
+class DashboardGenerator:
+    def __init__(self):
+        self.scraper = CompetitorScraper()
+        self.data_cache = {}
+        self.last_update = None
+        
+    def collect_all_data(self) -> Dict:
+        """Collect data from all competitors"""
+        all_data = {}
+        for name, config in COMPETITORS.items():
+            all_data[name] = self.scraper.scrape_competitor(name, config)
+        
+        self.data_cache = all_data
+        self.last_update = datetime.now()
+        return all_data
     
-    col1, col2, col3, col4 = st.columns(4)
+    def generate_overview_metrics(self, data: Dict) -> pd.DataFrame:
+        """Generate overview metrics table"""
+        metrics = []
+        for competitor, comp_data in data.items():
+            metrics.append({
+                'Competitor': competitor,
+                'Aktive Aktionen': len(comp_data.get('aktionen', [])),
+                'Top Keywords': ', '.join(comp_data.get('keywords', [])[:3]),
+                'Letzte Aktualisierung': comp_data.get('last_update', 'N/A'),
+                'Datenquelle': comp_data.get('source', 'unknown')
+            })
+        
+        return pd.DataFrame(metrics)
     
-    with col1:
-        st.metric(
-            label="Neue Aktionen entdeckt",
-            value="7", 
-            delta="↑3 vs. gestern",
-            help="Neue Leasing-Aktionen und Angebote"
+    def generate_price_comparison(self, data: Dict) -> go.Figure:
+        """Generate price comparison chart"""
+        fig = go.Figure()
+        
+        for competitor, comp_data in data.items():
+            aktionen = comp_data.get('aktionen', [])
+            if aktionen:
+                titles = [a['title'][:30] + '...' if len(a['title']) > 30 else a['title'] for a in aktionen]
+                prices = []
+                for a in aktionen:
+                    price_str = a.get('price', '0')
+                    # Extract numeric value
+                    price_match = re.search(r'(\d+[\'\d]*)', price_str.replace(',', ''))
+                    if price_match:
+                        prices.append(int(price_match.group(1).replace("'", "")))
+                    else:
+                        prices.append(0)
+                
+                fig.add_trace(go.Bar(
+                    name=competitor,
+                    x=titles,
+                    y=prices,
+                    text=[a.get('discount', '') for a in aktionen],
+                    textposition='auto',
+                ))
+        
+        fig.update_layout(
+            title='Aktuelle Aktionen & Preise',
+            xaxis_title='Angebote',
+            yaxis_title='Preis (CHF)',
+            barmode='group',
+            height=400,
+            showlegend=True
         )
-    
-    with col2:
-        st.metric(
-            label="Preisänderungen", 
-            value="12",
-            delta="↑5 vs. gestern",
-            help="Preis- und Konditionsänderungen"
-        )
-    
-    with col3:
-        st.metric(
-            label="Content-Updates",
-            value="23", 
-            delta="↑8 vs. gestern",
-            help="Neue Inhalte und Seiten-Updates"
-        )
-    
-    with col4:
-        st.metric(
-            label="Aktive Alerts",
-            value="5",
-            delta="↑2 vs. gestern", 
-            help="Alerts die Aufmerksamkeit benötigen"
-        )
-    
-    st.markdown("---")
-    
-    # Live Competitor Data
-    if selected_competitor != "Alle Competitors":
-        st.header(f"🔍 {selected_competitor} - Live Data")
         
-        # Load data if not already loaded
-        if selected_competitor not in st.session_state.crawl_data:
-            with st.spinner(f"Lade {selected_competitor} Daten..."):
-                scraper = CompetitorScraper()
-                if selected_competitor == "Emil Frey":
-                    st.session_state.crawl_data[selected_competitor] = scraper.scrape_emil_frey()
-                elif selected_competitor == "Garage Weiss":
-                    st.session_state.crawl_data[selected_competitor] = scraper.scrape_garage_weiss()
+        return fig
+    
+    def generate_keyword_analysis(self, data: Dict) -> go.Figure:
+        """Generate keyword frequency analysis"""
+        all_keywords = {}
+        for competitor, comp_data in data.items():
+            for keyword in comp_data.get('keywords', []):
+                if keyword not in all_keywords:
+                    all_keywords[keyword] = []
+                all_keywords[keyword].append(competitor)
         
-        # Display data
-        if selected_competitor in st.session_state.crawl_data:
-            data = st.session_state.crawl_data[selected_competitor]
+        # Sort by frequency
+        keyword_freq = [(k, len(v)) for k, v in all_keywords.items()]
+        keyword_freq.sort(key=lambda x: x[1], reverse=True)
+        
+        # Create chart
+        top_keywords = keyword_freq[:10]
+        fig = go.Figure(data=[
+            go.Bar(
+                x=[k[1] for k in top_keywords],
+                y=[k[0] for k in top_keywords],
+                orientation='h',
+                marker_color='lightblue'
+            )
+        ])
+        
+        fig.update_layout(
+            title='Top Keywords im Markt',
+            xaxis_title='Häufigkeit',
+            yaxis_title='Keywords',
+            height=400
+        )
+        
+        return fig
+    
+    def generate_alerts(self, data: Dict) -> List[str]:
+        """Generate competitive alerts"""
+        alerts = []
+        
+        for competitor, comp_data in data.items():
+            aktionen = comp_data.get('aktionen', [])
             
-            # Aktionen Tab
-            if data.get('aktionen'):
-                st.subheader("🎯 Aktuelle Aktionen & Angebote")
-                for i, aktion in enumerate(data['aktionen']):
-                    with st.expander(f"Aktion {i+1}: {aktion['title'][:50]}..."):
-                        st.write(f"**Volltext:** {aktion['title']}")
-                        st.write(f"**Quelle:** {aktion.get('source', 'Unbekannt')}")
-                        st.write(f"**Gefunden um:** {aktion.get('gefunden_um', 'Unbekannt')}")
-                        if aktion.get('link'):
-                            st.write(f"**Link:** {aktion['link']}")
-            
-            # Preise Tab (Emil Frey)
-            if selected_competitor == "Emil Frey" and data.get('preise'):
-                st.subheader("💰 Leasing & Preise")
-                for preis in data['preise']:
-                    st.info(f"📋 {preis['info']} *(Quelle: {preis['source']})*")
-            
-            # Services Tab (Garage Weiss)
-            if selected_competitor == "Garage Weiss" and data.get('services'):
-                st.subheader("🔧 Service-Angebote")
-                for service in data['services']:
-                    st.info(f"🛠️ {service['service']}")
-                    
-            # News (wenn vorhanden)
-            if data.get('news'):
-                st.subheader("📰 Aktuelle News")
-                for news in data['news']:
-                    st.write(f"• {news['headline']} *({news['timestamp']})*")
-    
-    else:
-        # Alle Competitors Overview
-        st.header("🌐 Alle Competitors - Übersicht")
+            # Check for aggressive pricing
+            for aktion in aktionen:
+                if '20%' in str(aktion.get('discount', '')) or '25%' in str(aktion.get('discount', '')):
+                    alerts.append(f"⚠️ {competitor}: Aggressive Rabattaktion - {aktion['title']}")
+                
+                if 'gratis' in aktion.get('title', '').lower():
+                    alerts.append(f"🎁 {competitor}: Gratis-Angebot - {aktion['title']}")
+                
+                if 'leasing' in aktion.get('title', '').lower():
+                    price = aktion.get('price', '')
+                    if 'CHF' in price and '/Mt' in price:
+                        alerts.append(f"💰 {competitor}: Leasing-Angebot - {aktion['title']}")
         
-        comp_col1, comp_col2 = st.columns(2)
+        # Check for missing keywords (content gaps)
+        our_keywords = set(['elektro', 'hybrid', 'online', 'digital'])
+        competitor_keywords = set()
+        for comp_data in data.values():
+            competitor_keywords.update(comp_data.get('keywords', []))
         
-        with comp_col1:
-            st.subheader("🏢 Emil Frey")
-            if 'Emil Frey' in st.session_state.crawl_data:
-                ef_data = st.session_state.crawl_data['Emil Frey']
-                st.write(f"**Aktionen:** {len(ef_data.get('aktionen', []))}")
-                st.write(f"**Preisinfos:** {len(ef_data.get('preise', []))}")
-                if ef_data.get('aktionen'):
-                    st.write("**Top Aktion:**")
-                    st.info(ef_data['aktionen'][0]['title'][:100] + "...")
-            else:
-                st.write("*Noch keine Daten geladen*")
+        missing_keywords = competitor_keywords - our_keywords
+        if missing_keywords:
+            alerts.append(f"📊 Content Gap entdeckt: Keywords fehlen: {', '.join(list(missing_keywords)[:3])}")
         
-        with comp_col2:
-            st.subheader("🏢 Garage Weiss")  
-            if 'Garage Weiss' in st.session_state.crawl_data:
-                gw_data = st.session_state.crawl_data['Garage Weiss']
-                st.write(f"**Aktionen:** {len(gw_data.get('aktionen', []))}")
-                st.write(f"**Services:** {len(gw_data.get('services', []))}")
-                if gw_data.get('aktionen'):
-                    st.write("**Top Aktion:**")
-                    st.info(gw_data['aktionen'][0]['title'][:100] + "...")
-            else:
-                st.write("*Noch keine Daten geladen*")
+        if not alerts:
+            alerts.append("✅ Keine kritischen Wettbewerber-Aktivitäten erkannt")
+        
+        return alerts[:5]  # Limit to 5 alerts
+
+# Gradio Interface Functions
+dashboard_gen = DashboardGenerator()
+
+def refresh_data():
+    """Refresh all competitor data"""
+    data = dashboard_gen.collect_all_data()
     
-    st.markdown("---")
+    # Generate components
+    metrics_df = dashboard_gen.generate_overview_metrics(data)
+    price_chart = dashboard_gen.generate_price_comparison(data)
+    keyword_chart = dashboard_gen.generate_keyword_analysis(data)
+    alerts = dashboard_gen.generate_alerts(data)
     
-    # Alerts Section  
-    st.header("🚨 Aktuelle Alerts & Intelligence")
-    
-    alerts = generate_mock_alerts()
-    
+    # Format alerts
+    alerts_html = "<div style='background-color: #f0f0f0; padding: 10px; border-radius: 5px;'>"
     for alert in alerts:
-        priority_color = "error" if "🔴" in alert["priority"] else ("warning" if "🟡" in alert["priority"] else "info")
+        color = '#ff6b6b' if '⚠️' in alert else '#51cf66' if '✅' in alert else '#339af0'
+        alerts_html += f"<p style='color: {color}; margin: 5px 0;'>{alert}</p>"
+    alerts_html += "</div>"
+    
+    # Status message
+    mode = "Demo-Modus" if dashboard_gen.scraper.use_demo_mode else "Live-Daten"
+    status = f"✅ Daten aktualisiert: {datetime.now().strftime('%H:%M:%S')} - {mode}"
+    
+    return metrics_df, price_chart, keyword_chart, alerts_html, status
+
+def export_data():
+    """Export current data as JSON"""
+    if dashboard_gen.data_cache:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"competitor_data_{timestamp}.json"
+        return json.dumps(dashboard_gen.data_cache, indent=2, ensure_ascii=False)
+    return "Keine Daten zum Exportieren vorhanden"
+
+# Create Gradio Interface
+with gr.Blocks(title="AMAG Competitor Intelligence", theme=gr.themes.Soft()) as app:
+    gr.Markdown("""
+    # 🚗 AMAG Competitor Intelligence Dashboard
+    **Echtzeit-Monitoring von Emil Frey, Garage Weiss und weiteren Wettbewerbern**
+    """)
+    
+    with gr.Row():
+        with gr.Column(scale=3):
+            gr.Markdown("### 📊 Dashboard Status")
+            status_text = gr.Markdown("Klicken Sie auf 'Daten aktualisieren' um zu starten")
+        with gr.Column(scale=1):
+            refresh_btn = gr.Button("🔄 Daten aktualisieren", variant="primary")
+            export_btn = gr.Button("📥 Daten exportieren")
+    
+    with gr.Tab("Overview"):
+        metrics_table = gr.DataFrame(
+            label="Wettbewerber-Übersicht",
+            headers=["Competitor", "Aktive Aktionen", "Top Keywords", "Letzte Aktualisierung", "Datenquelle"]
+        )
         
-        with st.container():
-            st.markdown(f"""
-            <div style="border-left: 4px solid {'#ff4444' if priority_color == 'error' else ('#ffaa00' if priority_color == 'warning' else '#0066cc')}; 
-                        padding: 1rem; margin: 0.5rem 0; background-color: #f8f9fa; border-radius: 0.25rem;">
-                <strong>{alert['zeit']} | {alert['competitor']} | {alert['typ']}</strong><br/>
-                {alert['details']}<br/>
-                <small><em>Impact: {alert['impact']}</em></small><br/>
-                <small><strong>Empfohlene Aktion:</strong> {alert['action']}</small>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # Content Gap Analysis
-    st.header("💡 Content-Opportunities für AMAG")
-    st.write("*Basierend auf Competitor-Analyse - Was machen andere gut, wo können wir nachziehen?*")
-    
-    opportunities = analyze_content_gaps()
-    
-    for opp in opportunities:
-        priority_emoji = "🔴" if opp["priority"] == "Hoch" else "🟡"
-        effort_emoji = "🟢" if opp["aufwand"] == "Niedrig" else ("🟡" if opp["aufwand"] == "Medium" else "🔴")
+    with gr.Tab("Preis-Analyse"):
+        price_plot = gr.Plot(label="Aktuelle Aktionen & Preise")
         
-        with st.expander(f"{priority_emoji} {opp['kategorie']}: {opp['gap'][:60]}..."):
-            st.write(f"**Was macht die Konkurrenz:** {opp['gap']}")
-            st.write(f"**AMAG Opportunity:** {opp['amag_opportunity']}")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write(f"**Priorität:** {priority_emoji} {opp['priority']}")
-            with col2:
-                st.write(f"**Aufwand:** {effort_emoji} {opp['aufwand']}")
+    with gr.Tab("Keyword-Analyse"):
+        keyword_plot = gr.Plot(label="Keyword-Häufigkeit")
+        
+    with gr.Tab("Alerts & Insights"):
+        alerts_display = gr.HTML(label="Wettbewerber-Alerts")
+        gr.Markdown("""
+        ### 💡 Empfohlene Aktionen:
+        1. **Preisanpassung prüfen** bei aggressiven Wettbewerber-Rabatten
+        2. **Content-Gaps schließen** durch fehlende Keywords
+        3. **Leasing-Angebote** bei starker Wettbewerber-Aktivität überdenken
+        4. **Saisonale Aktionen** rechtzeitig planen (Winter/Sommer)
+        """)
     
-    # Footer
-    st.markdown("---")
-    col1, col2, col3 = st.columns(3)
+    with gr.Tab("Export"):
+        export_text = gr.Textbox(
+            label="JSON Export",
+            lines=20,
+            max_lines=50,
+            placeholder="Klicken Sie auf 'Daten exportieren' um die Daten anzuzeigen"
+        )
     
-    with col1:
-        st.write(f"*Letztes Update: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
-    with col2:
-        st.write("*Datenquelle: Live Web Scraping*")  
-    with col3:
-        st.write("*AMAG Competitor Intelligence v1.0*")
+    # Event handlers
+    refresh_btn.click(
+        fn=refresh_data,
+        inputs=[],
+        outputs=[metrics_table, price_plot, keyword_plot, alerts_display, status_text]
+    )
+    
+    export_btn.click(
+        fn=export_data,
+        inputs=[],
+        outputs=[export_text]
+    )
+    
+    # Auto-refresh on load
+    app.load(
+        fn=refresh_data,
+        inputs=[],
+        outputs=[metrics_table, price_plot, keyword_plot, alerts_display, status_text]
+    )
 
-# Auto-refresh functionality
-def check_auto_refresh():
-    """Check if auto-refresh is needed (every 30 minutes)"""
-    if 'last_auto_refresh' not in st.session_state:
-        st.session_state.last_auto_refresh = datetime.now()
-        return True
-    
-    time_diff = datetime.now() - st.session_state.last_auto_refresh
-    if time_diff.total_seconds() > 1800:  # 30 minutes
-        st.session_state.last_auto_refresh = datetime.now()
-        return True
-    
-    return False
-
-# Run auto-refresh check
-if check_auto_refresh():
-    scraper = CompetitorScraper()
-    with st.spinner("🔄 Auto-Update läuft..."):
-        st.session_state.crawl_data['Emil Frey'] = scraper.scrape_emil_frey()
-        st.session_state.crawl_data['Garage Weiss'] = scraper.scrape_garage_weiss()
-
-# Run the app
+# Launch configuration for Hugging Face Spaces
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        st.error(f"Application Error: {str(e)}")
-        st.write("**Debug Info:**")
-        st.write(f"Python version: {st.__version__}")
-        st.write(f"Scraping available: {SCRAPING_AVAILABLE}")
-        st.exception(e)
+    app.launch(
+        share=False,
+        server_name="0.0.0.0",
+        server_port=7860,
+        show_error=True
+    )
