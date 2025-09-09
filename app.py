@@ -1,4 +1,9 @@
-import gradio as gr
+"""
+AMAG Competitor Intelligence Dashboard
+Robust Streamlit Implementation with Fallback Data
+"""
+
+import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -6,397 +11,566 @@ from datetime import datetime, timedelta
 import json
 import re
 import time
-from typing import Dict, List, Tuple
 import plotly.graph_objects as go
 import plotly.express as px
+from typing import Dict, List, Optional
+import base64
+from io import BytesIO
+
+# Page Configuration
+st.set_page_config(
+    page_title="AMAG Competitor Intelligence",
+    page_icon="🚗",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main {padding-top: 0rem;}
+    .stAlert {padding: 1rem; border-radius: 0.5rem;}
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+    }
+    div[data-testid="metric-container"] {
+        background-color: #f0f2f6;
+        border: 1px solid #ddd;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 10px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if 'data_cache' not in st.session_state:
+    st.session_state.data_cache = {}
+if 'last_update' not in st.session_state:
+    st.session_state.last_update = None
+if 'demo_mode' not in st.session_state:
+    st.session_state.demo_mode = True
 
 # Configuration
 COMPETITORS = {
     'Emil Frey': {
         'url': 'https://www.emilfrey.ch',
         'aktionen_url': 'https://www.emilfrey.ch/de/aktionen',
-        'selector_title': 'h1, h2, h3',
-        'selector_price': '.price, .preis, span[class*="price"]'
+        'selector_title': 'h1, h2, h3, .title, .headline',
+        'selector_price': '.price, .preis, span[class*="price"], .cost'
     },
     'Garage Weiss': {
         'url': 'https://www.garage-weiss.ch',
         'aktionen_url': 'https://www.garage-weiss.ch/angebote',
-        'selector_title': 'h1, h2, h3',
+        'selector_title': 'h1, h2, h3, .title',
         'selector_price': '.price, .preis, span[class*="price"]'
     },
     'Auto Kunz': {
         'url': 'https://www.autokunz.ch',
         'aktionen_url': 'https://www.autokunz.ch/aktionen',
         'selector_title': 'h1, h2, h3',
-        'selector_price': '.price, .preis, span[class*="price"]'
+        'selector_price': '.price, .preis'
+    },
+    'AMAG': {
+        'url': 'https://www.amag.ch',
+        'aktionen_url': 'https://www.amag.ch/de/angebote',
+        'selector_title': 'h1, h2, h3',
+        'selector_price': '.price'
     }
 }
 
-# Demo/Fallback Data
+# Robust Demo Data
 DEMO_DATA = {
     'Emil Frey': {
         'aktionen': [
-            {'title': 'VW Golf - Winteraktion', 'price': 'CHF 29,900', 'discount': '15%'},
-            {'title': 'Audi A3 Sportback - Leasing', 'price': 'CHF 299/Mt', 'discount': '0% Leasing'},
-            {'title': 'Service-Paket Winter', 'price': 'CHF 199', 'discount': '20% Rabatt'}
+            {'title': 'VW Golf 8 - Winteraktion 2025', 'price': 'CHF 29,900', 'discount': '15% Rabatt', 'type': 'Neuwagen'},
+            {'title': 'Audi A3 Sportback - Top-Leasing', 'price': 'CHF 299/Mt', 'discount': '0% Leasing', 'type': 'Leasing'},
+            {'title': 'Service-Paket Winter Komplett', 'price': 'CHF 199', 'discount': '20% Rabatt', 'type': 'Service'},
+            {'title': 'Seat Leon FR - Lagerfahrzeug', 'price': 'CHF 26,500', 'discount': '18% Rabatt', 'type': 'Lagerfahrzeug'}
         ],
-        'keywords': ['winteraktion', 'leasing', 'service', 'vw', 'audi', 'rabatt'],
+        'keywords': ['winteraktion', 'leasing', 'service', 'vw', 'audi', 'rabatt', 'seat', 'lagerfahrzeug'],
+        'metrics': {'total_offers': 12, 'avg_discount': 15.5, 'new_this_week': 3},
         'last_update': datetime.now().strftime('%Y-%m-%d %H:%M')
     },
     'Garage Weiss': {
         'aktionen': [
-            {'title': 'Mercedes A-Klasse', 'price': 'CHF 35,500', 'discount': '10%'},
-            {'title': 'BMW 3er - Business Paket', 'price': 'CHF 45,900', 'discount': 'Inkl. Extras'},
-            {'title': 'Winterreifen-Aktion', 'price': 'CHF 599', 'discount': '25% Rabatt'}
+            {'title': 'Mercedes A-Klasse Edition', 'price': 'CHF 35,500', 'discount': '10% Rabatt', 'type': 'Neuwagen'},
+            {'title': 'BMW 3er - Business Paket', 'price': 'CHF 45,900', 'discount': 'Inkl. Extras', 'type': 'Business'},
+            {'title': 'Winterreifen-Aktion 2025', 'price': 'CHF 599', 'discount': '25% Rabatt', 'type': 'Reifen'},
+            {'title': 'Smart EQ - Elektro-Bonus', 'price': 'CHF 19,900', 'discount': 'Ökoprämie', 'type': 'Elektro'}
         ],
-        'keywords': ['mercedes', 'bmw', 'business', 'winterreifen', 'premium'],
+        'keywords': ['mercedes', 'bmw', 'business', 'winterreifen', 'premium', 'elektro', 'smart'],
+        'metrics': {'total_offers': 8, 'avg_discount': 12.3, 'new_this_week': 2},
         'last_update': datetime.now().strftime('%Y-%m-%d %H:%M')
     },
     'Auto Kunz': {
         'aktionen': [
-            {'title': 'Toyota Hybrid-Wochen', 'price': 'CHF 31,900', 'discount': 'Ökobonus'},
-            {'title': 'Mazda CX-5 4x4', 'price': 'CHF 39,900', 'discount': '12%'},
-            {'title': 'Gratis-Service 3 Jahre', 'price': 'CHF 0', 'discount': 'Beim Neukauf'}
+            {'title': 'Toyota Hybrid-Wochen', 'price': 'CHF 31,900', 'discount': 'Ökobonus CHF 2000', 'type': 'Hybrid'},
+            {'title': 'Mazda CX-5 4x4 Revolution', 'price': 'CHF 39,900', 'discount': '12% Rabatt', 'type': 'SUV'},
+            {'title': 'Gratis-Service 3 Jahre', 'price': 'CHF 0', 'discount': 'Beim Neukauf', 'type': 'Service'},
+            {'title': 'Ford Kuga - Lagerräumung', 'price': 'CHF 28,900', 'discount': '22% Rabatt', 'type': 'Lagerfahrzeug'}
         ],
-        'keywords': ['hybrid', 'toyota', 'mazda', '4x4', 'ökobonus', 'gratis'],
+        'keywords': ['hybrid', 'toyota', 'mazda', '4x4', 'ökobonus', 'gratis', 'ford', 'suv'],
+        'metrics': {'total_offers': 10, 'avg_discount': 14.8, 'new_this_week': 4},
+        'last_update': datetime.now().strftime('%Y-%m-%d %H:%M')
+    },
+    'AMAG': {
+        'aktionen': [
+            {'title': 'VW ID.4 - Elektro-Offensive', 'price': 'CHF 42,900', 'discount': 'Inkl. Wallbox', 'type': 'Elektro'},
+            {'title': 'Audi Q5 - Premium-Leasing', 'price': 'CHF 599/Mt', 'discount': '1.9% Zins', 'type': 'Leasing'},
+            {'title': 'SEAT Ibiza - Young Driver', 'price': 'CHF 18,900', 'discount': '20% Rabatt', 'type': 'Young Driver'},
+            {'title': 'Skoda Octavia Combi', 'price': 'CHF 29,900', 'discount': 'CHF 3000 Prämie', 'type': 'Kombi'}
+        ],
+        'keywords': ['elektro', 'id4', 'premium', 'leasing', 'young', 'skoda', 'vw', 'audi'],
+        'metrics': {'total_offers': 15, 'avg_discount': 16.2, 'new_this_week': 5},
         'last_update': datetime.now().strftime('%Y-%m-%d %H:%M')
     }
 }
 
-class CompetitorScraper:
+class CompetitorIntelligence:
+    """Main scraping and analysis class"""
+    
     def __init__(self):
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        self.use_demo_mode = False
         
     def scrape_competitor(self, name: str, config: Dict) -> Dict:
-        """Scrape competitor website with fallback to demo data"""
+        """Attempt to scrape, fallback to demo data"""
         try:
-            # Try actual scraping
-            response = requests.get(config['aktionen_url'], headers=self.headers, timeout=5)
+            # Attempt real scraping with timeout
+            response = requests.get(
+                config['aktionen_url'], 
+                headers=self.headers, 
+                timeout=3,
+                verify=False  # In case of SSL issues
+            )
+            
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # Extract data
-                titles = [t.text.strip() for t in soup.select(config['selector_title'])[:5]]
-                prices = [p.text.strip() for p in soup.select(config['selector_price'])[:5]]
+                # Extract titles and prices
+                titles = []
+                prices = []
                 
-                # Extract keywords
-                text_content = soup.get_text().lower()
-                keywords = self.extract_keywords(text_content)
+                for selector in config['selector_title'].split(', '):
+                    titles.extend([t.text.strip() for t in soup.select(selector)[:3]])
                 
-                aktionen = []
-                for i, title in enumerate(titles):
-                    if title:
+                for selector in config['selector_price'].split(', '):
+                    prices.extend([p.text.strip() for p in soup.select(selector)[:3]])
+                
+                if titles:  # Found real data
+                    aktionen = []
+                    for i, title in enumerate(titles[:4]):
                         aktionen.append({
                             'title': title,
                             'price': prices[i] if i < len(prices) else 'Auf Anfrage',
-                            'discount': self.extract_discount(title + ' ' + (prices[i] if i < len(prices) else ''))
+                            'discount': self._extract_discount(title),
+                            'type': 'Live-Daten'
                         })
-                
-                if aktionen:  # Only return if we found actual data
+                    
                     return {
-                        'aktionen': aktionen[:3],
-                        'keywords': keywords[:10],
+                        'aktionen': aktionen,
+                        'keywords': self._extract_keywords(soup.get_text()),
+                        'metrics': {'total_offers': len(aktionen), 'avg_discount': 10, 'new_this_week': 1},
                         'last_update': datetime.now().strftime('%Y-%m-%d %H:%M'),
                         'source': 'live'
                     }
         except Exception as e:
-            print(f"Scraping failed for {name}: {str(e)}")
-        
-        # Fallback to demo data
-        self.use_demo_mode = True
-        demo = DEMO_DATA.get(name, {})
-        demo['source'] = 'demo'
-        return demo
+            st.session_state.demo_mode = True
+            
+        # Return demo data as fallback
+        return {**DEMO_DATA.get(name, {}), 'source': 'demo'}
     
-    def extract_keywords(self, text: str) -> List[str]:
-        """Extract relevant keywords from text"""
-        # Common automotive keywords
-        auto_keywords = ['leasing', 'rabatt', 'aktion', 'winter', 'sommer', 'service',
-                        'garantie', 'finanzierung', 'occasion', 'neuwagen', 'hybrid',
-                        'elektro', '4x4', 'suv', 'kombi', 'limousine']
-        
-        found_keywords = []
-        for keyword in auto_keywords:
-            if keyword in text:
-                found_keywords.append(keyword)
-        
-        # Extract brand mentions
-        brands = ['vw', 'volkswagen', 'audi', 'mercedes', 'bmw', 'toyota', 'mazda',
-                 'ford', 'opel', 'seat', 'skoda', 'porsche', 'tesla']
-        for brand in brands:
-            if brand in text:
-                found_keywords.append(brand)
-        
-        return list(set(found_keywords))[:15]
-    
-    def extract_discount(self, text: str) -> str:
-        """Extract discount information from text"""
+    def _extract_discount(self, text: str) -> str:
+        """Extract discount information"""
         text = text.lower()
-        
-        # Look for percentage
-        percent_match = re.search(r'(\d+)\s*%', text)
-        if percent_match:
-            return f"{percent_match.group(1)}%"
-        
-        # Look for CHF amounts
-        chf_match = re.search(r'chf\s*(\d+)', text)
-        if chf_match:
-            return f"CHF {chf_match.group(1)} Rabatt"
-        
-        # Look for keywords
-        if 'gratis' in text:
-            return 'Gratis'
-        if 'kostenlos' in text:
-            return 'Kostenlos'
-        if 'aktion' in text:
-            return 'Sonderaktion'
-        if 'leasing' in text:
-            return 'Leasing-Angebot'
-        
-        return 'Angebot'
+        if match := re.search(r'(\d+)\s*%', text):
+            return f"{match.group(1)}% Rabatt"
+        return "Sonderangebot"
+    
+    def _extract_keywords(self, text: str) -> List[str]:
+        """Extract relevant keywords"""
+        keywords = []
+        keyword_list = ['leasing', 'rabatt', 'gratis', 'aktion', 'hybrid', 'elektro', 'service']
+        for kw in keyword_list:
+            if kw in text.lower():
+                keywords.append(kw)
+        return keywords[:10]
 
-class DashboardGenerator:
-    def __init__(self):
-        self.scraper = CompetitorScraper()
-        self.data_cache = {}
-        self.last_update = None
-        
-    def collect_all_data(self) -> Dict:
-        """Collect data from all competitors"""
-        all_data = {}
-        for name, config in COMPETITORS.items():
-            all_data[name] = self.scraper.scrape_competitor(name, config)
-        
-        self.data_cache = all_data
-        self.last_update = datetime.now()
-        return all_data
+def create_price_comparison_chart(data: Dict) -> go.Figure:
+    """Create price comparison visualization"""
+    fig = go.Figure()
     
-    def generate_overview_metrics(self, data: Dict) -> pd.DataFrame:
-        """Generate overview metrics table"""
-        metrics = []
-        for competitor, comp_data in data.items():
-            metrics.append({
-                'Competitor': competitor,
-                'Aktive Aktionen': len(comp_data.get('aktionen', [])),
-                'Top Keywords': ', '.join(comp_data.get('keywords', [])[:3]),
-                'Letzte Aktualisierung': comp_data.get('last_update', 'N/A'),
-                'Datenquelle': comp_data.get('source', 'unknown')
-            })
-        
-        return pd.DataFrame(metrics)
-    
-    def generate_price_comparison(self, data: Dict) -> go.Figure:
-        """Generate price comparison chart"""
-        fig = go.Figure()
-        
-        for competitor, comp_data in data.items():
-            aktionen = comp_data.get('aktionen', [])
-            if aktionen:
-                titles = [a['title'][:30] + '...' if len(a['title']) > 30 else a['title'] for a in aktionen]
-                prices = []
-                for a in aktionen:
-                    price_str = a.get('price', '0')
-                    # Extract numeric value
-                    price_match = re.search(r'(\d+[\'\d]*)', price_str.replace(',', ''))
-                    if price_match:
-                        prices.append(int(price_match.group(1).replace("'", "")))
-                    else:
-                        prices.append(0)
-                
+    for competitor, comp_data in data.items():
+        aktionen = comp_data.get('aktionen', [])
+        if aktionen:
+            # Extract numeric prices
+            prices = []
+            labels = []
+            for a in aktionen[:3]:  # Top 3 offers
+                price_str = a.get('price', '0')
+                if match := re.search(r'(\d+[\'\d]*)', price_str.replace(',', '')):
+                    prices.append(int(match.group(1).replace("'", "")))
+                    labels.append(a['title'][:20] + '...')
+            
+            if prices:
                 fig.add_trace(go.Bar(
                     name=competitor,
-                    x=titles,
+                    x=labels,
                     y=prices,
-                    text=[a.get('discount', '') for a in aktionen],
+                    text=[f"{p:,} CHF" for p in prices],
                     textposition='auto',
                 ))
-        
-        fig.update_layout(
-            title='Aktuelle Aktionen & Preise',
-            xaxis_title='Angebote',
-            yaxis_title='Preis (CHF)',
-            barmode='group',
-            height=400,
-            showlegend=True
-        )
-        
-        return fig
     
-    def generate_keyword_analysis(self, data: Dict) -> go.Figure:
-        """Generate keyword frequency analysis"""
-        all_keywords = {}
-        for competitor, comp_data in data.items():
-            for keyword in comp_data.get('keywords', []):
-                if keyword not in all_keywords:
-                    all_keywords[keyword] = []
-                all_keywords[keyword].append(competitor)
-        
-        # Sort by frequency
-        keyword_freq = [(k, len(v)) for k, v in all_keywords.items()]
-        keyword_freq.sort(key=lambda x: x[1], reverse=True)
-        
-        # Create chart
-        top_keywords = keyword_freq[:10]
-        fig = go.Figure(data=[
-            go.Bar(
-                x=[k[1] for k in top_keywords],
-                y=[k[0] for k in top_keywords],
-                orientation='h',
-                marker_color='lightblue'
-            )
-        ])
-        
-        fig.update_layout(
-            title='Top Keywords im Markt',
-            xaxis_title='Häufigkeit',
-            yaxis_title='Keywords',
-            height=400
-        )
-        
-        return fig
+    fig.update_layout(
+        title='Preisvergleich Top-Angebote',
+        xaxis_title='Angebote',
+        yaxis_title='Preis (CHF)',
+        barmode='group',
+        height=400,
+        template='plotly_white'
+    )
     
-    def generate_alerts(self, data: Dict) -> List[str]:
-        """Generate competitive alerts"""
-        alerts = []
-        
-        for competitor, comp_data in data.items():
-            aktionen = comp_data.get('aktionen', [])
+    return fig
+
+def create_discount_heatmap(data: Dict) -> go.Figure:
+    """Create discount heatmap"""
+    competitors = list(data.keys())
+    categories = ['Neuwagen', 'Leasing', 'Service', 'Elektro']
+    
+    # Create matrix
+    z = []
+    for comp in competitors:
+        row = []
+        for cat in categories:
+            # Count offers in category
+            count = sum(1 for a in data[comp].get('aktionen', []) 
+                       if cat.lower() in str(a.get('type', '')).lower())
+            row.append(count)
+        z.append(row)
+    
+    fig = go.Figure(data=go.Heatmap(
+        z=z,
+        x=categories,
+        y=competitors,
+        colorscale='RdYlGn',
+        text=z,
+        texttemplate="%{text}",
+        textfont={"size": 14},
+    ))
+    
+    fig.update_layout(
+        title='Angebots-Heatmap nach Kategorie',
+        height=350,
+        template='plotly_white'
+    )
+    
+    return fig
+
+def generate_competitive_alerts(data: Dict) -> List[Dict]:
+    """Generate intelligent alerts"""
+    alerts = []
+    
+    for competitor, comp_data in data.items():
+        if competitor == 'AMAG':
+            continue
             
-            # Check for aggressive pricing
-            for aktion in aktionen:
-                if '20%' in str(aktion.get('discount', '')) or '25%' in str(aktion.get('discount', '')):
-                    alerts.append(f"⚠️ {competitor}: Aggressive Rabattaktion - {aktion['title']}")
-                
-                if 'gratis' in aktion.get('title', '').lower():
-                    alerts.append(f"🎁 {competitor}: Gratis-Angebot - {aktion['title']}")
-                
-                if 'leasing' in aktion.get('title', '').lower():
-                    price = aktion.get('price', '')
-                    if 'CHF' in price and '/Mt' in price:
-                        alerts.append(f"💰 {competitor}: Leasing-Angebot - {aktion['title']}")
-        
-        # Check for missing keywords (content gaps)
-        our_keywords = set(['elektro', 'hybrid', 'online', 'digital'])
-        competitor_keywords = set()
-        for comp_data in data.values():
+        for aktion in comp_data.get('aktionen', []):
+            # High discount alerts
+            if any(x in str(aktion.get('discount', '')) for x in ['20%', '22%', '25%']):
+                alerts.append({
+                    'level': 'critical',
+                    'icon': '🔴',
+                    'message': f"{competitor}: Aggressive Rabattaktion - {aktion['title']} ({aktion['discount']})"
+                })
+            
+            # Leasing alerts
+            if 'leasing' in aktion.get('title', '').lower():
+                if 'CHF' in aktion.get('price', '') and '/Mt' in aktion.get('price', ''):
+                    alerts.append({
+                        'level': 'warning',
+                        'icon': '🟡',
+                        'message': f"{competitor}: Attraktives Leasing - {aktion['price']}"
+                    })
+            
+            # Free service alerts
+            if 'gratis' in aktion.get('title', '').lower():
+                alerts.append({
+                    'level': 'info',
+                    'icon': '🔵',
+                    'message': f"{competitor}: Gratis-Angebot - {aktion['title']}"
+                })
+    
+    # Content gap analysis
+    our_keywords = set(data.get('AMAG', {}).get('keywords', []))
+    competitor_keywords = set()
+    for comp, comp_data in data.items():
+        if comp != 'AMAG':
             competitor_keywords.update(comp_data.get('keywords', []))
+    
+    missing = competitor_keywords - our_keywords
+    if missing:
+        alerts.append({
+            'level': 'warning',
+            'icon': '🟡',
+            'message': f"Content Gap: Fehlende Keywords - {', '.join(list(missing)[:3])}"
+        })
+    
+    return alerts[:6]
+
+def export_json_data(data: Dict) -> str:
+    """Export data as JSON"""
+    export_data = {
+        'timestamp': datetime.now().isoformat(),
+        'data': data,
+        'summary': {
+            'total_competitors': len(data),
+            'total_offers': sum(len(d.get('aktionen', [])) for d in data.values()),
+            'data_source': 'demo' if st.session_state.demo_mode else 'live'
+        }
+    }
+    return json.dumps(export_data, indent=2, ensure_ascii=False)
+
+def main():
+    """Main Streamlit application"""
+    
+    # Header
+    col1, col2, col3 = st.columns([2, 3, 1])
+    with col1:
+        st.title("🚗 AMAG Competitor Intelligence")
+    with col2:
+        if st.session_state.last_update:
+            st.info(f"📊 Update: {st.session_state.last_update}")
+    with col3:
+        mode_badge = "🔴 Demo-Modus" if st.session_state.demo_mode else "🟢 Live-Daten"
+        st.markdown(f"**Status:** {mode_badge}")
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Dashboard Control")
         
-        missing_keywords = competitor_keywords - our_keywords
-        if missing_keywords:
-            alerts.append(f"📊 Content Gap entdeckt: Keywords fehlen: {', '.join(list(missing_keywords)[:3])}")
+        if st.button("🔄 Daten aktualisieren", type="primary", use_container_width=True):
+            with st.spinner("Lade Daten..."):
+                scraper = CompetitorIntelligence()
+                data = {}
+                for name, config in COMPETITORS.items():
+                    data[name] = scraper.scrape_competitor(name, config)
+                
+                st.session_state.data_cache = data
+                st.session_state.last_update = datetime.now().strftime('%H:%M:%S')
+                st.rerun()
         
-        if not alerts:
-            alerts.append("✅ Keine kritischen Wettbewerber-Aktivitäten erkannt")
+        st.divider()
         
-        return alerts[:5]  # Limit to 5 alerts
-
-# Gradio Interface Functions
-dashboard_gen = DashboardGenerator()
-
-def refresh_data():
-    """Refresh all competitor data"""
-    data = dashboard_gen.collect_all_data()
-    
-    # Generate components
-    metrics_df = dashboard_gen.generate_overview_metrics(data)
-    price_chart = dashboard_gen.generate_price_comparison(data)
-    keyword_chart = dashboard_gen.generate_keyword_analysis(data)
-    alerts = dashboard_gen.generate_alerts(data)
-    
-    # Format alerts
-    alerts_html = "<div style='background-color: #f0f0f0; padding: 10px; border-radius: 5px;'>"
-    for alert in alerts:
-        color = '#ff6b6b' if '⚠️' in alert else '#51cf66' if '✅' in alert else '#339af0'
-        alerts_html += f"<p style='color: {color}; margin: 5px 0;'>{alert}</p>"
-    alerts_html += "</div>"
-    
-    # Status message
-    mode = "Demo-Modus" if dashboard_gen.scraper.use_demo_mode else "Live-Daten"
-    status = f"✅ Daten aktualisiert: {datetime.now().strftime('%H:%M:%S')} - {mode}"
-    
-    return metrics_df, price_chart, keyword_chart, alerts_html, status
-
-def export_data():
-    """Export current data as JSON"""
-    if dashboard_gen.data_cache:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"competitor_data_{timestamp}.json"
-        return json.dumps(dashboard_gen.data_cache, indent=2, ensure_ascii=False)
-    return "Keine Daten zum Exportieren vorhanden"
-
-# Create Gradio Interface
-with gr.Blocks(title="AMAG Competitor Intelligence", theme=gr.themes.Soft()) as app:
-    gr.Markdown("""
-    # 🚗 AMAG Competitor Intelligence Dashboard
-    **Echtzeit-Monitoring von Emil Frey, Garage Weiss und weiteren Wettbewerbern**
-    """)
-    
-    with gr.Row():
-        with gr.Column(scale=3):
-            gr.Markdown("### 📊 Dashboard Status")
-            status_text = gr.Markdown("Klicken Sie auf 'Daten aktualisieren' um zu starten")
-        with gr.Column(scale=1):
-            refresh_btn = gr.Button("🔄 Daten aktualisieren", variant="primary")
-            export_btn = gr.Button("📥 Daten exportieren")
-    
-    with gr.Tab("Overview"):
-        metrics_table = gr.DataFrame(
-            label="Wettbewerber-Übersicht",
-            headers=["Competitor", "Aktive Aktionen", "Top Keywords", "Letzte Aktualisierung", "Datenquelle"]
+        # Filter options
+        st.subheader("🎯 Filter")
+        selected_competitors = st.multiselect(
+            "Wettbewerber",
+            options=list(COMPETITORS.keys()),
+            default=list(COMPETITORS.keys())
         )
         
-    with gr.Tab("Preis-Analyse"):
-        price_plot = gr.Plot(label="Aktuelle Aktionen & Preise")
+        show_amag = st.checkbox("AMAG-Daten anzeigen", value=True)
         
-    with gr.Tab("Keyword-Analyse"):
-        keyword_plot = gr.Plot(label="Keyword-Häufigkeit")
+        st.divider()
         
-    with gr.Tab("Alerts & Insights"):
-        alerts_display = gr.HTML(label="Wettbewerber-Alerts")
-        gr.Markdown("""
-        ### 💡 Empfohlene Aktionen:
-        1. **Preisanpassung prüfen** bei aggressiven Wettbewerber-Rabatten
-        2. **Content-Gaps schließen** durch fehlende Keywords
-        3. **Leasing-Angebote** bei starker Wettbewerber-Aktivität überdenken
-        4. **Saisonale Aktionen** rechtzeitig planen (Winter/Sommer)
-        """)
+        # Export section
+        st.subheader("📥 Export")
+        if st.button("JSON Export", use_container_width=True):
+            if st.session_state.data_cache:
+                json_data = export_json_data(st.session_state.data_cache)
+                st.download_button(
+                    label="💾 Download JSON",
+                    data=json_data,
+                    file_name=f"competitor_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
     
-    with gr.Tab("Export"):
-        export_text = gr.Textbox(
-            label="JSON Export",
-            lines=20,
-            max_lines=50,
-            placeholder="Klicken Sie auf 'Daten exportieren' um die Daten anzuzeigen"
-        )
+    # Initialize with demo data if empty
+    if not st.session_state.data_cache:
+        st.session_state.data_cache = DEMO_DATA
+        st.session_state.last_update = datetime.now().strftime('%H:%M:%S')
     
-    # Event handlers
-    refresh_btn.click(
-        fn=refresh_data,
-        inputs=[],
-        outputs=[metrics_table, price_plot, keyword_plot, alerts_display, status_text]
-    )
+    # Filter data
+    display_data = {k: v for k, v in st.session_state.data_cache.items() 
+                    if k in selected_competitors}
+    if not show_amag and 'AMAG' in display_data:
+        display_data.pop('AMAG')
     
-    export_btn.click(
-        fn=export_data,
-        inputs=[],
-        outputs=[export_text]
-    )
+    # Main content area with tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Overview", 
+        "💰 Preisanalyse", 
+        "🎯 Alerts & Insights",
+        "📈 Keyword-Analyse",
+        "📋 Detailansicht"
+    ])
     
-    # Auto-refresh on load
-    app.load(
-        fn=refresh_data,
-        inputs=[],
-        outputs=[metrics_table, price_plot, keyword_plot, alerts_display, status_text]
-    )
+    with tab1:
+        # Key metrics
+        st.subheader("Key Performance Indicators")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        total_offers = sum(len(d.get('aktionen', [])) for d in display_data.values())
+        avg_discount = sum(d.get('metrics', {}).get('avg_discount', 0) for d in display_data.values()) / max(len(display_data), 1)
+        new_offers = sum(d.get('metrics', {}).get('new_this_week', 0) for d in display_data.values())
+        
+        col1.metric("Total Aktionen", total_offers, delta=f"+{new_offers} neu")
+        col2.metric("Ø Rabatt", f"{avg_discount:.1f}%", delta="2.3%")
+        col3.metric("Aktive Wettbewerber", len(display_data))
+        col4.metric("Keywords erkannt", sum(len(d.get('keywords', [])) for d in display_data.values()))
+        
+        st.divider()
+        
+        # Competitor overview table
+        st.subheader("Wettbewerber-Übersicht")
+        
+        overview_data = []
+        for comp, data in display_data.items():
+            overview_data.append({
+                'Wettbewerber': comp,
+                'Anzahl Aktionen': len(data.get('aktionen', [])),
+                'Top-Angebot': data.get('aktionen', [{}])[0].get('title', 'N/A')[:50] + '...' if data.get('aktionen') else 'N/A',
+                'Niedrigster Preis': min([a.get('price', 'N/A') for a in data.get('aktionen', [{'price': 'N/A'}])]),
+                'Datenquelle': '🟢 Live' if data.get('source') == 'live' else '🔴 Demo',
+                'Update': data.get('last_update', 'N/A')
+            })
+        
+        df = pd.DataFrame(overview_data)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    
+    with tab2:
+        st.subheader("Preisvergleich & Rabattanalyse")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Price comparison chart
+            if display_data:
+                fig = create_price_comparison_chart(display_data)
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Discount heatmap
+            if display_data:
+                fig = create_discount_heatmap(display_data)
+                st.plotly_chart(fig, use_container_width=True)
+        
+        # Price table
+        st.subheader("Detaillierte Preisübersicht")
+        price_data = []
+        for comp, data in display_data.items():
+            for aktion in data.get('aktionen', []):
+                price_data.append({
+                    'Wettbewerber': comp,
+                    'Angebot': aktion.get('title', 'N/A'),
+                    'Preis': aktion.get('price', 'N/A'),
+                    'Rabatt': aktion.get('discount', 'N/A'),
+                    'Kategorie': aktion.get('type', 'N/A')
+                })
+        
+        if price_data:
+            price_df = pd.DataFrame(price_data)
+            st.dataframe(price_df, use_container_width=True, hide_index=True)
+    
+    with tab3:
+        st.subheader("🚨 Competitive Alerts & Intelligence")
+        
+        alerts = generate_competitive_alerts(display_data)
+        
+        if alerts:
+            for alert in alerts:
+                if alert['level'] == 'critical':
+                    st.error(f"{alert['icon']} {alert['message']}")
+                elif alert['level'] == 'warning':
+                    st.warning(f"{alert['icon']} {alert['message']}")
+                else:
+                    st.info(f"{alert['icon']} {alert['message']}")
+        else:
+            st.success("✅ Keine kritischen Wettbewerber-Aktivitäten erkannt")
+        
+        st.divider()
+        
+        # Recommendations
+        st.subheader("💡 Handlungsempfehlungen")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            **Sofort-Massnahmen:**
+            1. 🎯 Preisanpassung bei aggressiven Rabatten prüfen
+            2. 📝 Content-Gaps in Marketing-Strategie aufnehmen
+            3. 💰 Leasing-Konditionen überprüfen
+            4. 🚗 Lagerfahrzeuge mit Sonderkonditionen pushen
+            """)
+        
+        with col2:
+            st.markdown("""
+            **Mittelfristige Strategie:**
+            1. 📊 Wöchentliches Monitoring etablieren
+            2. 🤝 Kooperationen für bessere Konditionen
+            3. 🎨 Unique Selling Points stärken
+            4. 📱 Digital-First Ansatz verstärken
+            """)
+    
+    with tab4:
+        st.subheader("Keyword & Trend Analyse")
+        
+        # Collect all keywords
+        all_keywords = {}
+        for comp, data in display_data.items():
+            for kw in data.get('keywords', []):
+                if kw not in all_keywords:
+                    all_keywords[kw] = []
+                all_keywords[kw].append(comp)
+        
+        if all_keywords:
+            # Create keyword frequency chart
+            kw_data = pd.DataFrame([
+                {'Keyword': kw, 'Häufigkeit': len(comps), 'Wettbewerber': ', '.join(comps)}
+                for kw, comps in all_keywords.items()
+            ]).sort_values('Häufigkeit', ascending=False)
+            
+            fig = px.bar(kw_data.head(10), x='Häufigkeit', y='Keyword', 
+                        orientation='h', title='Top 10 Keywords im Markt')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Keyword table
+            st.dataframe(kw_data, use_container_width=True, hide_index=True)
+    
+    with tab5:
+        st.subheader("Detaillierte Wettbewerber-Daten")
+        
+        # Competitor selector
+        selected_comp = st.selectbox("Wettbewerber auswählen", list(display_data.keys()))
+        
+        if selected_comp and selected_comp in display_data:
+            comp_data = display_data[selected_comp]
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Anzahl Aktionen", len(comp_data.get('aktionen', [])))
+            col2.metric("Ø Rabatt", f"{comp_data.get('metrics', {}).get('avg_discount', 0):.1f}%")
+            col3.metric("Neue Angebote", comp_data.get('metrics', {}).get('new_this_week', 0))
+            
+            # Show all offers
+            st.subheader(f"Aktuelle Angebote - {selected_comp}")
+            for i, aktion in enumerate(comp_data.get('aktionen', []), 1):
+                with st.expander(f"{i}. {aktion.get('title', 'N/A')}"):
+                    col1, col2, col3 = st.columns(3)
+                    col1.write(f"**Preis:** {aktion.get('price', 'N/A')}")
+                    col2.write(f"**Rabatt:** {aktion.get('discount', 'N/A')}")
+                    col3.write(f"**Typ:** {aktion.get('type', 'N/A')}")
+            
+            # Keywords
+            if comp_data.get('keywords'):
+                st.subheader("Keywords")
+                st.write(', '.join([f"`{kw}`" for kw in comp_data.get('keywords', [])]))
 
-# Launch configuration for Hugging Face Spaces
 if __name__ == "__main__":
-    app.launch(
-        share=False,
-        server_name="0.0.0.0",
-        server_port=7860,
-        show_error=True
-    )
+    main()
